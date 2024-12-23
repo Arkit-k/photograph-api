@@ -1,0 +1,28 @@
+# Ignore node_modules
+node_modules/
+
+# Ignore logs
+*.log
+
+# Ignore temporary files
+*.tmp
+
+# Ignore environment files
+.env
+
+# Ignore Dockerfile itself (optional)
+Dockerfile
+
+# Ignore Git directories and files
+.git/
+.gitignore
+
+# Ignore build directories
+build/
+dist/
+
+# Ignore IDE files (e.g., VSCode)
+.vscode/
+
+# Ignore macOS system files
+.DS_Store

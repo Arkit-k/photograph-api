@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: photography-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/photography
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  # PostgreSQL database service
+  db:
+    image: postgres:13-alpine
+    container_name: photography-db
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=photography
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+# Define a network so that the API and DB containers can communicate
+networks:
+  app-network:
+    driver: bridge
+
+# Define a volume to persist PostgreSQL data
+volumes:
+  postgres-data:
