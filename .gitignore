@@ -1,2 +1,31 @@
+# Node.js dependencies
 node_modules/
+
+# Logs
+*.log
+
+# Environment files
 .env
+
+# Operating system files
+.DS_Store        # macOS
+Thumbs.db        # Windows
+
+# IDE files
+.vscode/
+.idea/
+
+# Build directories
+dist/
+build/
+
+# Temporary files
+*.tmp
+
+# Test coverage
+coverage/
+
+# npm package lock
+package-lock.json
+
+
