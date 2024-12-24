@@ -15,13 +15,16 @@ datasource db {
 
 
 model Photo {
-  id      Int    @id @default(autoincrement())
-  url     String
-  tags    String[]
+  id        Int      @id @default(autoincrement())
+  title     String   @default("")
+  updatedAt DateTime @default(now()) @updatedAt
+  deletedAt DateTime?
+  tags      String[] @default([])  // If you're storing tags as an array
 }
-
 model Video {
-  id      Int    @id @default(autoincrement())
-  url     String
-  tags    String[]
+  id        Int      @id @default(autoincrement())
+  title     String   @default("")
+  updatedAt DateTime @default(now()) @updatedAt
+  deletedAt DateTime?
+  tags      String[] @default([])  // If you're storing tags as an array
 }
