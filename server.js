@@ -1,10 +1,12 @@
 import express from 'express';
+import os from 'os';
+import checkDiskSpace from 'check-disk-space';
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import path from 'path';
-
 import { fileURLToPath } from 'url';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -33,54 +35,115 @@ const upload = multer({ storage });
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+});
+
+// Apply rate limiting globally (for all routes)
+app.use(limiter);
+
+
 const errorHandler = (err, req, res, next) => {
   console.error(err.stack);
   res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 };
 
-// Search photo by ID
-app.get("/photos/:id", async (req, res, next) => {
-      const { id } = req.params;
-      try {
-        const photo = await prisma.photo.findUnique({
-          where: { id: parseInt(id, 10) },
-        });
-    
-        if (!photo) {
-          return res.status(404).json({ error: "Photo not found" });
-        }
-    
-        res.json(photo);
-      } catch (error) {
-        next(err);
+const fetchAndCache = async (modelName, identifier, redisKey, prismaQuery, res, next) => {
+  try {
+    // Check Redis for cached data
+    redisClient.get(redisKey, async (err, data) => {
+      if (err) {
+        console.error("Redis error:", err);
+        return next(err);
       }
+
+      if (data) {
+        // If cached data is found, return it
+        return res.json(JSON.parse(data));
+      }
+
+      // Query the database
+      const result = await prisma[modelName][prismaQuery.method](prismaQuery.options);
+
+      if (!result || (Array.isArray(result) && result.length === 0)) {
+        return res.status(404).json({ error: `${modelName} not found` });
+      }
+
+      // Cache the result in Redis (TTL: 3600 seconds)
+      redisClient.setex(redisKey, 3600, JSON.stringify(result));
+
+      // Return the result
+      res.json(result);
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+app.get('/health', async (req, res) => {
+  try {
+    // Run a simple query to check database connection
+    await prisma.$queryRaw`SELECT 1`;
+
+    // Get memory information
+    const freeMemory = os.freemem() / (1024 * 1024); // in MB
+    const totalMemory = os.totalmem() / (1024 * 1024); // in MB
+
+    // Get disk space information
+    const diskSpace = await checkDiskSpace('C:/'); // specify the disk path (e.g., C:/)
+
+    // Respond with health status and resource info
+    res.status(200).json({
+      status: 'healthy',
+      memory: {
+        freeMemory: freeMemory.toFixed(2) + ' MB',
+        totalMemory: totalMemory.toFixed(2) + ' MB',
+      },
+      disk: {
+        free: (diskSpace.free / (1024 * 1024)).toFixed(2) + ' MB', // Convert bytes to MB
+        total: (diskSpace.total / (1024 * 1024)).toFixed(2) + ' MB', // Convert bytes to MB
+      },
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message || 'Unexpected error',
+    });
+  }
+});
+
+// Search photo by ID with redis 
+app.get("/v1/photos/:id", async (req, res, next) => {
+  const { id } = req.params;
+  const redisKey = `photos:id:${id}`;
+  const prismaQuery = {
+    method: "findUnique",
+    options: { where: { id: parseInt(id, 10) } },
+  };
+
+  await fetchAndCache("photo", id, redisKey, prismaQuery, res, next);
+});
+
     
     // Search photos by tag name
-    app.get("/photos/tag/:tagName", async (req, res, next) => {
-      const { tagName } = req.params;
-      try {
-        const photos = await prisma.photo.findMany({
-          where: {
-            tags: {
-              has: tagName, // Prisma array filter to check if the tag exists
-            },
-          },
-        });
-    
-        if (photos.length === 0) {
-          return res.status(404).json({ error: "No photos found with the given tag" });
-        }
-    
-        res.json(photos);
-      } catch (err) {
-        next(err)
-      }
-    });
+app.get("/v1/photos/tag/:tagName", async (req, res, next) => {
+  const { tagName } = req.params;
+    const redisKey = `photos:tag:${tagName}`;
+      const prismaQuery = {
+        method: "findMany",
+        options: { where: { tags: { has: tagName } } }, // Prisma array filter
+      };
+      
+      await fetchAndCache("photo", tagName, redisKey, prismaQuery, res, next);
+});
 
 
 // Photo Upload Endpoint
-app.post('/photos/upload', upload.single('photo'), async (req, res, next) => {
+app.post('/v1/photos/upload', upload.single('photo'), async (req, res, next) => {
   try {
     const { tags } = req.body;
     const file = req.file;
@@ -113,90 +176,97 @@ app.post('/photos/upload', upload.single('photo'), async (req, res, next) => {
   }
 });
 
-    
 
 // Search video by ID
-app.get("/videos/:id", async (req, res,next) => {
-      const { id } = req.params;
-      try {
-        const video = await prisma.video.findUnique({
-          where: { id: parseInt(id, 10) },
-        });
-    
-        if (!video) {
-          return res.status(404).json({ error: "Video not found" });
-        }
-    
-        res.json(video);
-      } catch (err) {
-        next(err)
-      }
-    });
-    
-    // Search videos by tag name
-app.get("/videos/tag/:tagName", async (req, res,next) => {
-  const { tagName } = req.params;
-  try {
-    const videos = await prisma.video.findMany({
-      where: {
-        tags: {
-          has: tagName, 
-        },
-      },
-    });
-    if (videos.length === 0) {
-      return res.status(404).json({ error: "No videos found with the given tag" });
-    }
-    res.json(videos);
-  } catch (err) {
-    next(err)
-  }
+app.get("/v1/videos/:id", async (req, res, next) => {
+  const { id } = req.params;
+  const redisKey = `videos:id:${id}`;
+  const prismaQuery = {
+    method: "findUnique",
+    options: { where: { id: parseInt(id, 10) } },
+  };
+
+  await fetchAndCache("video", id, redisKey, prismaQuery, res, next);
 });
     
+    // Search videos by tag name
+    app.get("/v1/videos/tag/:tagName", async (req, res, next) => {
+      const { tagName } = req.params;
+      const redisKey = `videos:tag:${tagName}`;
+      const prismaQuery = {
+        method: "findMany",
+        options: { where: { tags: { has: tagName } } }, // Prisma array filter
+      };
+    
+      await fetchAndCache("video", tagName, redisKey, prismaQuery, res, next);
+    });
+    
+    
 
-app.get('/photos', async (req, res, next) => {
+app.get('/v1/photos', async (req, res, next) => {
   try {
     const { page = 1, limit = 10, tag } = req.query;
+
+    // Parse pagination values
     const offset = (page - 1) * limit;
+    const parsedPage = parseInt(page, 10);
+    const parsedLimit = parseInt(limit, 10);
+
     const where = tag
-    ? {
-      tags: {
-        has: tag,
-      },
-    }
-    : {};
+      ? {
+          tags: {
+            has: tag,  // Filter photos that have the specific tag
+          },
+        }
+      : {};
+
+    // Fetch photos with pagination and filtering
     const photos = await prisma.photo.findMany({
       where,
-      skip: parseInt(offset, 10),
-      take: parseInt(limit, 10),
+      skip: offset,
+      take: parsedLimit,
     });
+
+    // Get total count of photos matching the filter
     const totalPhotos = await prisma.photo.count({ where });
-    const totalPages = Math.ceil(totalPhotos / limit);
-    res.json({ photos, totalPhotos, totalPages, currentPage: parseInt(page, 10) });
+    const totalPages = Math.ceil(totalPhotos / parsedLimit);
+
+    // Send the response
+    res.json({
+      photos,
+      totalPhotos,
+      totalPages,
+      currentPage: parsedPage,
+    });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/photos/:id', async (req, res, next) => {
+
+app.delete('/v1/photos/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const deletedPhoto = await prisma.photo.delete({
+    // Soft delete the photo by setting the deletedAt field
+    const deletedPhoto = await prisma.photo.update({
       where: { id: Number(id) },
+      data: { deletedAt: new Date() }, // Soft delete by setting deletedAt to current timestamp
     });
 
-    res.json(deletedPhoto);
+    res.json(deletedPhoto); // Respond with the updated photo, including the deletedAt field
   } catch (err) {
     if (err.code === 'P2025') {
       err = { status: 404, message: 'Photo not found' };
     }
-    next(err);
+    next(err); // Pass the error to the error-handling middleware
   }
 });
 
+
+
 // Video endpoints
-app.post('/videos/upload', upload.single('video'), async (req, res, next) => {
+app.post('/v1/videos/upload', upload.single('video'), async (req, res, next) => {
   try {
     const { tags } = req.body;
     const file = req.file;
@@ -230,7 +300,7 @@ app.post('/videos/upload', upload.single('video'), async (req, res, next) => {
 });
 
 
-app.get('/videos', async (req, res, next) => {
+app.get('/v1/videos/', async (req, res, next) => {
   try {
     const { page = 1, limit = 10, tag } = req.query;
     const offset = (page - 1) * limit;
@@ -258,22 +328,23 @@ app.get('/videos', async (req, res, next) => {
   }
 });
 
-
-
-app.delete('/videos/:id', async (req, res, next) => {
+// Express.js route for soft deleting a video
+app.delete('/v1/videos/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const deletedVideo = await prisma.video.delete({
+    // Soft delete the video by setting the deletedAt field
+    const deletedVideo = await prisma.video.update({
       where: { id: Number(id) },
+      data: { deletedAt: new Date() }, // Soft delete by setting deletedAt to current timestamp
     });
 
-    res.json(deletedVideo);
+    res.json(deletedVideo); // Respond with the updated video, including the deletedAt field
   } catch (err) {
     if (err.code === 'P2025') {
       err = { status: 404, message: 'Video not found' };
     }
-    next(err);
+    next(err); // Pass the error to the error-handling middleware
   }
 });
 

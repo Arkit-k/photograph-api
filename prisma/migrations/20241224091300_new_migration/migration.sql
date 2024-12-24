@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "Photo" ALTER COLUMN "tags" SET DEFAULT ARRAY[]::TEXT[];
+
+-- AlterTable
+ALTER TABLE "Video" ALTER COLUMN "tags" SET DEFAULT ARRAY[]::TEXT[];
