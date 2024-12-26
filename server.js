@@ -1,5 +1,6 @@
 import express from 'express';
 import os from 'os';
+import { createClient } from 'redis';
 import checkDiskSpace from 'check-disk-space';
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
@@ -9,6 +10,26 @@ import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
 
 dotenv.config();
+
+
+const redisClient = createClient({
+    username:process.env.REDIS_USER_NAME ,
+    password: process.env.REDIS_PASSWORD,
+    socket: {
+        host: process.env.REDIS_HOST,
+        port: process.env.REDIS_PORT
+    }
+});
+
+redisClient.on('error', err => console.log('Redis Client Error', err));
+
+await redisClient.connect();
+
+await redisClient.set('foo', 'bar');
+const result = await redisClient.get('foo');
+console.log(result)  // >>> bar
+
+
 
 const prisma = new PrismaClient();
 const app = express();
@@ -300,7 +321,7 @@ app.post('/v1/videos/upload', upload.single('video'), async (req, res, next) => 
 });
 
 
-app.get('/v1/videos/', async (req, res, next) => {
+app.get('/v1/videos', async (req, res, next) => {
   try {
     const { page = 1, limit = 10, tag } = req.query;
     const offset = (page - 1) * limit;
