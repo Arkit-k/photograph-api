@@ -1,5 +1,6 @@
 import express from 'express';
 import os from 'os';
+import cors from 'cors'
 import { createClient } from 'redis';
 import checkDiskSpace from 'check-disk-space';
 import { PrismaClient } from '@prisma/client';
@@ -69,6 +70,7 @@ const limiter = rateLimit({
 
 // Apply rate limiting globally (for all routes)
 app.use(limiter);
+app.use(cors());
 
 
 const errorHandler = (err, req, res, next) => {
