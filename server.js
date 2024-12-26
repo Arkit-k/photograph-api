@@ -21,14 +21,19 @@ const redisClient = createClient({
     }
 });
 
-redisClient.on('error', err => console.log('Redis Client Error', err));
+redisClient.on('error', (err) => {
+  console.error('Redis connection error:', err);
+});
 
-await redisClient.connect();
-
-await redisClient.set('foo', 'bar');
-const result = await redisClient.get('foo');
-console.log(result)  // >>> bar
-
+// Connect to Redis
+(async () => {
+  try {
+    await redisClient.connect();
+    console.log('Redis connected successfully');
+  } catch (err) {
+    console.error('Error connecting to Redis:', err);
+  }
+})();
 
 
 const prisma = new PrismaClient();
@@ -71,37 +76,35 @@ const errorHandler = (err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 };
 
+// Remove the promisify and use the native Promise-based methods
+
 const fetchAndCache = async (modelName, identifier, redisKey, prismaQuery, res, next) => {
   try {
     // Check Redis for cached data
-    redisClient.get(redisKey, async (err, data) => {
-      if (err) {
-        console.error("Redis error:", err);
-        return next(err);
-      }
+    const data = await redisClient.get(redisKey); // Directly await the promise
+    
+    if (data) {
+      // If cached data is found, return it
+      return res.json(JSON.parse(data));
+    }
 
-      if (data) {
-        // If cached data is found, return it
-        return res.json(JSON.parse(data));
-      }
+    // Query the database
+    const result = await prisma[modelName][prismaQuery.method](prismaQuery.options);
 
-      // Query the database
-      const result = await prisma[modelName][prismaQuery.method](prismaQuery.options);
+    if (!result || (Array.isArray(result) && result.length === 0)) {
+      return res.status(404).json({ error: `${modelName} not found` });
+    }
 
-      if (!result || (Array.isArray(result) && result.length === 0)) {
-        return res.status(404).json({ error: `${modelName} not found` });
-      }
+    // Cache the result in Redis (TTL: 3600 seconds)
+    await redisClient.setex(redisKey, 3600, JSON.stringify(result)); // Directly await the promise
 
-      // Cache the result in Redis (TTL: 3600 seconds)
-      redisClient.setex(redisKey, 3600, JSON.stringify(result));
-
-      // Return the result
-      res.json(result);
-    });
+    // Return the result
+    res.json(result);
   } catch (err) {
     next(err);
   }
 };
+
 
 
 app.get('/health', async (req, res) => {
@@ -139,28 +142,55 @@ app.get('/health', async (req, res) => {
 
 // Search photo by ID with redis 
 app.get("/v1/photos/:id", async (req, res, next) => {
-  const { id } = req.params;
-  const redisKey = `photos:id:${id}`;
-  const prismaQuery = {
-    method: "findUnique",
-    options: { where: { id: parseInt(id, 10) } },
-  };
+  try {
+    const { id } = req.params;
 
-  await fetchAndCache("photo", id, redisKey, prismaQuery, res, next);
+    // Validate that `id` is a number
+    if (isNaN(id) || parseInt(id, 10) <= 0) {
+      return res.status(400).json({ error: "Invalid photo ID" });
+    }
+
+    const redisKey = `photos:id:${id}`;
+    const prismaQuery = {
+      method: "findUnique",
+      options: { where: { id: parseInt(id, 10) } },
+    };
+
+    // Call the fetchAndCache function
+    await fetchAndCache("photo", id, redisKey, prismaQuery, res, next);
+  } catch (err) {
+    // Log the error if something goes wrong
+    console.error("Error fetching photo:", err);
+    next(err); // Pass the error to the next middleware
+  }
 });
 
     
     // Search photos by tag name
-app.get("/v1/photos/tag/:tagName", async (req, res, next) => {
-  const { tagName } = req.params;
-    const redisKey = `photos:tag:${tagName}`;
-      const prismaQuery = {
-        method: "findMany",
-        options: { where: { tags: { has: tagName } } }, // Prisma array filter
-      };
-      
-      await fetchAndCache("photo", tagName, redisKey, prismaQuery, res, next);
-});
+    app.get("/v1/photos/tag/:tagName", async (req, res, next) => {
+      try {
+        const { tagName } = req.params;
+    
+        // Validate that `tagName` is a non-empty string
+        if (!tagName || typeof tagName !== "string" || tagName.trim() === "") {
+          return res.status(400).json({ error: "Invalid tag name" });
+        }
+    
+        const redisKey = `photos:tag:${tagName}`;
+        const prismaQuery = {
+          method: "findMany",
+          options: { where: { tags: { has: tagName } } }, // Prisma array filter
+        };
+    
+        // Call the fetchAndCache function
+        await fetchAndCache("photo", tagName, redisKey, prismaQuery, res, next);
+      } catch (err) {
+        // Log the error if something goes wrong
+        console.error("Error fetching photos by tag:", err);
+        next(err); // Pass the error to the next middleware
+      }
+    });
+    
 
 
 // Photo Upload Endpoint
@@ -200,26 +230,53 @@ app.post('/v1/photos/upload', upload.single('photo'), async (req, res, next) => 
 
 // Search video by ID
 app.get("/v1/videos/:id", async (req, res, next) => {
-  const { id } = req.params;
-  const redisKey = `videos:id:${id}`;
-  const prismaQuery = {
-    method: "findUnique",
-    options: { where: { id: parseInt(id, 10) } },
-  };
+  try {
+    const { id } = req.params;
 
-  await fetchAndCache("video", id, redisKey, prismaQuery, res, next);
+    // Validate that `id` is a positive integer
+    if (isNaN(id) || parseInt(id, 10) <= 0) {
+      return res.status(400).json({ error: "Invalid video ID" });
+    }
+
+    const redisKey = `videos:id:${id}`;
+    const prismaQuery = {
+      method: "findUnique",
+      options: { where: { id: parseInt(id, 10) } },
+    };
+
+    // Call the fetchAndCache function
+    await fetchAndCache("video", id, redisKey, prismaQuery, res, next);
+  } catch (err) {
+    // Log and pass the error to the next middleware
+    console.error("Error fetching video by ID:", err);
+    next(err); // Pass the error to the next middleware
+  }
 });
+
     
     // Search videos by tag name
     app.get("/v1/videos/tag/:tagName", async (req, res, next) => {
-      const { tagName } = req.params;
-      const redisKey = `videos:tag:${tagName}`;
-      const prismaQuery = {
-        method: "findMany",
-        options: { where: { tags: { has: tagName } } }, // Prisma array filter
-      };
+      try {
+        const { tagName } = req.params;
     
-      await fetchAndCache("video", tagName, redisKey, prismaQuery, res, next);
+        // Validate that `tagName` is a non-empty string
+        if (!tagName || typeof tagName !== "string" || tagName.trim() === "") {
+          return res.status(400).json({ error: "Invalid tag name" });
+        }
+    
+        const redisKey = `videos:tag:${tagName}`;
+        const prismaQuery = {
+          method: "findMany",
+          options: { where: { tags: { has: tagName } } }, // Prisma array filter
+        };
+    
+        // Call the fetchAndCache function
+        await fetchAndCache("video", tagName, redisKey, prismaQuery, res, next);
+      } catch (err) {
+        // Log and pass the error to the next middleware
+        console.error("Error fetching videos by tag:", err);
+        next(err); // Pass the error to the next middleware
+      }
     });
     
     
