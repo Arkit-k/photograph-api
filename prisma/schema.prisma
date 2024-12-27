@@ -15,16 +15,20 @@ datasource db {
 
 
 model Photo {
-  id        Int      @id @default(autoincrement())
-  title     String   @default("")
-  updatedAt DateTime @default(now()) @updatedAt
+  id        String   @id @default(cuid())
+  url       String   // This should be here
+  tags      String[] // Or it could be a relation to another model
   deletedAt DateTime?
-  tags      String[] @default([])  // If you're storing tags as an array
+  title     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 model Video {
-  id        Int      @id @default(autoincrement())
-  title     String   @default("")
-  updatedAt DateTime @default(now()) @updatedAt
+  id        String   @id @default(cuid())  
+  url       String
+  tags      String[]
   deletedAt DateTime?
-  tags      String[] @default([])  // If you're storing tags as an array
+  title     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

@@ -1,5 +1,6 @@
 import express from 'express';
 import os from 'os';
+import fs from 'fs';
 import cors from 'cors'
 import { createClient } from 'redis';
 import checkDiskSpace from 'check-disk-space';
@@ -43,6 +44,11 @@ const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
 app.use(express.json());
 
 // Configure Multer for file uploads
@@ -79,7 +85,6 @@ const errorHandler = (err, req, res, next) => {
 };
 
 // Remove the promisify and use the native Promise-based methods
-
 const fetchAndCache = async (modelName, identifier, redisKey, prismaQuery, res, next) => {
   try {
     // Check Redis for cached data
@@ -98,7 +103,7 @@ const fetchAndCache = async (modelName, identifier, redisKey, prismaQuery, res, 
     }
 
     // Cache the result in Redis (TTL: 3600 seconds)
-    await redisClient.setex(redisKey, 3600, JSON.stringify(result)); // Directly await the promise
+    await redisClient.setEx(redisKey, 3600, JSON.stringify(result)); // Using setEx for node-redis
 
     // Return the result
     res.json(result);
@@ -106,6 +111,7 @@ const fetchAndCache = async (modelName, identifier, redisKey, prismaQuery, res, 
     next(err);
   }
 };
+
 
 
 
@@ -147,15 +153,15 @@ app.get("/v1/photos/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Validate that `id` is a number
-    if (isNaN(id) || parseInt(id, 10) <= 0) {
+    // Validate that `id` is a non-empty string
+    if (!id || typeof id !== "string") {
       return res.status(400).json({ error: "Invalid photo ID" });
     }
 
     const redisKey = `photos:id:${id}`;
     const prismaQuery = {
       method: "findUnique",
-      options: { where: { id: parseInt(id, 10) } },
+      options: { where: { id: String(id) } },  // Ensure the id is passed as a string
     };
 
     // Call the fetchAndCache function
@@ -167,183 +173,210 @@ app.get("/v1/photos/:id", async (req, res, next) => {
   }
 });
 
-    
+
+// Search photos by tag name
+app.get("/v1/photos", async (req, res, next) => {
+  try {
+    const { tags } = req.query;  // Retrieve tags from query parameters
+
+    // Validate that `tags` is a non-empty string
+    if (!tags || typeof tags !== "string") {
+      return res.status(400).json({ error: "Invalid tags" });
+    }
+
+    // Split the tags into an array and trim any spaces
+    const tagList = tags.split(",").map(tag => tag.trim());
+
+    const redisKey = `photos:tags:${tagList.join(",")}`; // Use tags to form the cache key
+    const prismaQuery = {
+      method: "findMany",  // Use `findMany` for multiple results
+      options: {
+        where: {
+          tags: {
+            hasSome: tagList,  // `hasSome` allows matching any of the provided tags
+          },
+        },
+      },
+    };
+
+    // Call the fetchAndCache function to fetch and cache results
+    await fetchAndCache("photo", tags, redisKey, prismaQuery, res, next);
+  } catch (err) {
+    // Log the error if something goes wrong
+    console.error("Error fetching photos by tags:", err);
+    next(err);  // Pass the error to the next middleware
+  }
+});
+
+app.get('/v1/videos', async (req, res, next) => {
+  try {
+    // Fetch all videos from the database
+    const videos = await prisma.video.findMany();
+
+    // Respond with the full list of videos
+    res.json({ videos, totalVideos: videos.length });
+  } catch (err) {
+    console.error('Error fetching all videos:', err);
+    next(err); // Pass error to the next middleware
+  }
+});
+
+
     // Search photos by tag name
-    app.get("/v1/photos/tag/:tagName", async (req, res, next) => {
+    app.post('/v1/photos/upload', upload.single('photo'), async (req, res, next) => {
       try {
-        const { tagName } = req.params;
+        console.log('Request Body:', req.body);  // Log the request body
+        console.log('Uploaded File:', req.file);  // Log the uploaded file
     
-        // Validate that `tagName` is a non-empty string
-        if (!tagName || typeof tagName !== "string" || tagName.trim() === "") {
-          return res.status(400).json({ error: "Invalid tag name" });
+        const { tags, imageId } = req.body;
+        const file = req.file;
+    
+        if (!file) {
+          return res.status(400).json({ error: 'Photo file is required' });
         }
     
-        const redisKey = `photos:tag:${tagName}`;
-        const prismaQuery = {
-          method: "findMany",
-          options: { where: { tags: { has: tagName } } }, // Prisma array filter
-        };
+        if (!tags) {
+          return res.status(400).json({ error: 'Tags are required' });
+        }
     
-        // Call the fetchAndCache function
-        await fetchAndCache("photo", tagName, redisKey, prismaQuery, res, next);
+        const photoCount = await prisma.photo.count();
+        if (photoCount >= 50) {
+          return res.status(400).json({ error: 'Photo storage limit reached (50)' });
+        }
+    
+        if (imageId) {
+          console.log('Received Image ID:', imageId); // Log the imageId
+    
+          const existingPhoto = await prisma.photo.findUnique({
+            where: { id: imageId }
+          });
+    
+          if (existingPhoto) {
+            return res.status(400).json({ error: 'Photo ID already exists' });
+          }
+        }
+    
+        const newPhoto = await prisma.photo.create({
+          data: {
+            url: `/uploads/${file.filename}`, 
+            tags: JSON.parse(tags),
+            id: imageId ,  // Include ID if provided
+          },
+        });
+        res.status(201).json(newPhoto);
       } catch (err) {
-        // Log the error if something goes wrong
-        console.error("Error fetching photos by tag:", err);
-        next(err); // Pass the error to the next middleware
+        console.error('Error uploading photo:', err); // Log the error
+        next(err);  // Pass error to global error handler
       }
     });
     
 
-
-// Photo Upload Endpoint
-app.post('/v1/photos/upload', upload.single('photo'), async (req, res, next) => {
+// Search video by ID
+app.delete('/v1/videos/:id', async (req, res, next) => {
   try {
-    const { tags } = req.body;
-    const file = req.file;
+    const { id } = req.params;
 
-    if (!file) {
-      return res.status(400).json({ error: 'Photo file is required' });
+    // Validate that the ID is a non-empty string
+    if (!id || typeof id !== 'string') {
+      return res.status(400).json({ error: 'Invalid video ID' });
     }
 
-    if (!tags) {
-      return res.status(400).json({ error: 'Tags are required' });
-    }
-
-    // Check if the photo count has exceeded the limit (50 photos)
-    const photoCount = await prisma.photo.count();
-    if (photoCount >= 50) {
-      return res.status(400).json({ error: 'Photo storage limit reached (50)' });
-    }
-
-    const newPhoto = await prisma.photo.create({
-      data: {
-        url: `/uploads/${file.filename}`, // Store the file path
-        tags: JSON.parse(tags), // Parse tags if sent as a JSON string
-      },
+    // Perform a soft delete by updating the deletedAt field
+    const deletedVideo = await prisma.video.update({
+      where: { id: String(id) }, // Ensure the ID is treated as a string
+      data: { deletedAt: new Date() }, // Set the deletedAt timestamp
     });
 
-    res.status(201).json(newPhoto);
+    // Return the updated (soft-deleted) video record
+    res.json({ message: 'Video deleted successfully', video: deletedVideo });
   } catch (err) {
-    console.error('Error uploading photo:', err);
+    // Handle Prisma's "record not found" error (P2025)
+    if (err.code === 'P2025') {
+      return res.status(404).json({ error: 'Video not found' });
+    }
+
+    // Log and pass other errors to the middleware
+    console.error('Error deleting video:', err);
     next(err);
   }
 });
 
 
-// Search video by ID
-app.get("/v1/videos/:id", async (req, res, next) => {
+    
+// Search videos by tag name
+app.get("/v1/videos", async (req, res, next) => {
   try {
-    const { id } = req.params;
+    const { tags } = req.query; // Retrieve tags from query parameters
 
-    // Validate that `id` is a positive integer
-    if (isNaN(id) || parseInt(id, 10) <= 0) {
-      return res.status(400).json({ error: "Invalid video ID" });
+    // Log the received query parameters for debugging
+    console.log("Received query parameters:", req.query);
+
+    // Validate that `tags` is a non-empty string
+    if (!tags) {
+      return res.status(400).json({ error: "Tags query parameter is required" });
+    }
+    if (typeof tags !== "string") {
+      return res.status(400).json({ error: "Tags should be a comma-separated string" });
     }
 
-    const redisKey = `videos:id:${id}`;
+    // Split the tags into an array and trim any spaces
+    const tagList = tags.split(",").map((tag) => tag.trim());
+
+    const redisKey = `videos:tags:${tagList.join(",")}`; // Use tags to form the cache key
     const prismaQuery = {
-      method: "findUnique",
-      options: { where: { id: parseInt(id, 10) } },
+      method: "findMany", // Use `findMany` for multiple results
+      options: {
+        where: {
+          tags: {
+            hasSome: tagList, // `hasSome` allows matching any of the provided tags
+          },
+        },
+      },
     };
 
-    // Call the fetchAndCache function
-    await fetchAndCache("video", id, redisKey, prismaQuery, res, next);
+    // Call the fetchAndCache function to fetch and cache results
+    await fetchAndCache("video", tags, redisKey, prismaQuery, res, next);
   } catch (err) {
-    // Log and pass the error to the next middleware
-    console.error("Error fetching video by ID:", err);
+    // Log the error if something goes wrong
+    console.error("Error fetching videos by tags:", err);
     next(err); // Pass the error to the next middleware
   }
 });
 
-    
-    // Search videos by tag name
-    app.get("/v1/videos/tag/:tagName", async (req, res, next) => {
-      try {
-        const { tagName } = req.params;
-    
-        // Validate that `tagName` is a non-empty string
-        if (!tagName || typeof tagName !== "string" || tagName.trim() === "") {
-          return res.status(400).json({ error: "Invalid tag name" });
-        }
-    
-        const redisKey = `videos:tag:${tagName}`;
-        const prismaQuery = {
-          method: "findMany",
-          options: { where: { tags: { has: tagName } } }, // Prisma array filter
-        };
-    
-        // Call the fetchAndCache function
-        await fetchAndCache("video", tagName, redisKey, prismaQuery, res, next);
-      } catch (err) {
-        // Log and pass the error to the next middleware
-        console.error("Error fetching videos by tag:", err);
-        next(err); // Pass the error to the next middleware
-      }
-    });
-    
-    
 
-app.get('/v1/photos', async (req, res, next) => {
-  try {
-    const { page = 1, limit = 10, tag } = req.query;
-
-    // Parse pagination values
-    const offset = (page - 1) * limit;
-    const parsedPage = parseInt(page, 10);
-    const parsedLimit = parseInt(limit, 10);
-
-    const where = tag
-      ? {
-          tags: {
-            has: tag,  // Filter photos that have the specific tag
-          },
-        }
-      : {};
-
-    // Fetch photos with pagination and filtering
-    const photos = await prisma.photo.findMany({
-      where,
-      skip: offset,
-      take: parsedLimit,
-    });
-
-    // Get total count of photos matching the filter
-    const totalPhotos = await prisma.photo.count({ where });
-    const totalPages = Math.ceil(totalPhotos / parsedLimit);
-
-    // Send the response
-    res.json({
-      photos,
-      totalPhotos,
-      totalPages,
-      currentPage: parsedPage,
-    });
-  } catch (err) {
-    next(err);
-  }
-});
 
 
 app.delete('/v1/photos/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
 
+    // Ensure the ID is a valid string (if it's not, return an error)
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({ error: "Invalid photo ID" });
+    }
+
     // Soft delete the photo by setting the deletedAt field
     const deletedPhoto = await prisma.photo.update({
-      where: { id: Number(id) },
-      data: { deletedAt: new Date() }, // Soft delete by setting deletedAt to current timestamp
+      where: { id: String(id) }, // Ensure id is a string
+      data: { deletedAt: new Date() }, // Soft delete by setting deletedAt to the current timestamp
     });
+
+    if (!deletedPhoto) {
+      return res.status(404).json({ error: "Photo not found" });
+    }
 
     res.json(deletedPhoto); // Respond with the updated photo, including the deletedAt field
   } catch (err) {
+    // Handle Prisma error for record not found (P2025)
     if (err.code === 'P2025') {
-      err = { status: 404, message: 'Photo not found' };
+      return res.status(404).json({ error: 'Photo not found' });
     }
+
+    // Catch any other errors
+    console.error('Error deleting photo:', err);
     next(err); // Pass the error to the error-handling middleware
   }
 });
-
-
 
 // Video endpoints
 app.post('/v1/videos/upload', upload.single('video'), async (req, res, next) => {
@@ -351,10 +384,12 @@ app.post('/v1/videos/upload', upload.single('video'), async (req, res, next) => 
     const { tags } = req.body;
     const file = req.file;
 
+    // Check if file is provided
     if (!file) {
       return res.status(400).json({ error: 'Video file is required' });
     }
 
+    // Check if tags are provided
     if (!tags) {
       return res.status(400).json({ error: 'Tags are required' });
     }
@@ -365,6 +400,7 @@ app.post('/v1/videos/upload', upload.single('video'), async (req, res, next) => 
       return res.status(400).json({ error: 'Video storage limit reached (20)' });
     }
 
+    // Create new video entry in the database
     const newVideo = await prisma.video.create({
       data: {
         url: `/uploads/${file.filename}`, // Store the file path
@@ -372,50 +408,81 @@ app.post('/v1/videos/upload', upload.single('video'), async (req, res, next) => 
       },
     });
 
+    // Respond with the new video data
     res.status(201).json(newVideo);
   } catch (err) {
     console.error('Error uploading video:', err);
-    next(err);
+    next(err); // Pass the error to the next middleware
   }
 });
+;
 
 
 app.get('/v1/videos', async (req, res, next) => {
   try {
     const { page = 1, limit = 10, tag } = req.query;
-    const offset = (page - 1) * limit;
 
+    // Parse and validate query parameters
+    const currentPage = parseInt(page, 10) > 0 ? parseInt(page, 10) : 1;
+    const pageSize = parseInt(limit, 10);
+
+    // Build the `where` clause based on the optional `tag` filter
     const where = tag
       ? {
           tags: {
-            has: tag,
+            has: tag.trim(),
           },
         }
       : {};
 
-    const videos = await prisma.video.findMany({
-      where,
-      skip: parseInt(offset, 10),
-      take: parseInt(limit, 10),
+    // Fetch all videos if `limit` is 0 or not provided
+    const isFetchAll = !limit || pageSize === 0;
+
+    // Query videos and total count
+    const [videos, totalVideos] = await Promise.all([
+      prisma.video.findMany({
+        where,
+        ...(isFetchAll
+          ? {} // Fetch all videos without skip/take
+          : {
+              skip: (currentPage - 1) * pageSize,
+              take: pageSize,
+            }),
+      }),
+      prisma.video.count({ where }),
+    ]);
+
+    const totalPages = isFetchAll ? 1 : Math.ceil(totalVideos / pageSize);
+
+    // Return response with metadata
+    res.json({
+      videos,
+      totalVideos,
+      totalPages,
+      currentPage: isFetchAll ? null : currentPage,
+      hasNextPage: !isFetchAll && currentPage < totalPages,
+      hasPreviousPage: !isFetchAll && currentPage > 1,
     });
-
-    const totalVideos = await prisma.video.count({ where });
-    const totalPages = Math.ceil(totalVideos / limit);
-
-    res.json({ videos, totalVideos, totalPages, currentPage: parseInt(page, 10) });
   } catch (err) {
-    next(err);
+    console.error('Error fetching videos:', err);
+    next(err); // Pass error to the next middleware
   }
 });
+
 
 // Express.js route for soft deleting a video
 app.delete('/v1/videos/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
 
+    // Validate that `id` is a string
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({ error: "Invalid video ID" });
+    }
+
     // Soft delete the video by setting the deletedAt field
     const deletedVideo = await prisma.video.update({
-      where: { id: Number(id) },
+      where: { id: id }, // Use the string id directly here
       data: { deletedAt: new Date() }, // Soft delete by setting deletedAt to current timestamp
     });
 
@@ -432,6 +499,7 @@ app.delete('/v1/videos/:id', async (req, res, next) => {
 app.use((req, res, next) => {
   res.status(404).json({ error: 'Route not found' });
 });
+
 
 // Apply error handling middleware
 app.use(errorHandler);
