@@ -1,5 +1,7 @@
 i am arkit karmokar i am a creative developer web and ai/ml lets go learning 
 
+documentation read this to use the api
+
 routes
 search = /v1/photos
 post route = /v1/photos/upload
